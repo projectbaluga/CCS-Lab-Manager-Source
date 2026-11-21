@@ -241,6 +241,8 @@ fn init(db: &Connection) {
         db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS \"{}\"(id INTEGER PRIMARY KEY AUTOINCREMENT,{}{});", t.name, cols.join(","), extra)).expect("schema");
     }
     let _ = db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS ux_users ON users(username); CREATE INDEX IF NOT EXISTS ix_maint ON maintenance(lab_id,date); CREATE INDEX IF NOT EXISTS ix_assets ON assets(lab_id,status);");
+    // Remove credential-bearing details written by older versions of the audit logger.
+    let _ = db.execute("UPDATE audit SET detail=?1 WHERE tbl='users' AND (instr(detail, '\"password\"') > 0 OR instr(detail, '\"pass_hash\"') > 0)", [r#"{"redacted":"legacy user credential data removed"}"#]);
     let n: i64 = db.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap_or(0);
     if n > 0 { return; }
     for (u, f, r, p) in [("admin", "Administrator", "admin", "admin123"), ("tech", "IT Technician", "technician", "tech123"), ("viewer", "Viewer", "viewer", "viewer123")] {
