@@ -1,0 +1,23 @@
+# Rust build output
+/target/
+
+# Local application databases and backups
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

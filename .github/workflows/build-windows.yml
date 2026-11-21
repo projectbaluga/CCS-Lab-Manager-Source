@@ -1,0 +1,38 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo files
+        uses: Swatinem/rust-cache@v2
+
+      - name: Use sanitized demo data for this build
+        shell: pwsh
+        run: Copy-Item -Path seed.demo.json -Destination seed.json -Force
+
+      - name: Build release executable
+        run: cargo build --release
+        continue-on-error: false
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCS-Lab-Manager-Windows-EXE
+          path: target/release/ccs-lab-manager.exe
+          if-no-files-found: error
+          retention-days: 14

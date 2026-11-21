@@ -1,0 +1,122 @@
+{
+  "labs": [
+    {
+      "code": "DEMO-201",
+      "name": "Demo Computer Laboratory 1",
+      "seats": 20,
+      "specs": "Sample workstation specifications",
+      "notes": "Synthetic demonstration data only"
+    },
+    {
+      "code": "DEMO-202",
+      "name": "Demo Computer Laboratory 2",
+      "seats": 15,
+      "specs": "Sample workstation specifications",
+      "notes": "Synthetic demonstration data only"
+    }
+  ],
+  "assets": [
+    {
+      "tag": "DEMO-PC-001",
+      "lab_id": 1,
+      "category": "Desktop PC",
+      "name": "Demo Desktop PC",
+      "specs": "Sample CPU, RAM and storage",
+      "serial": "DEMO-SERIAL-001",
+      "qty": 10,
+      "status": "Serviceable",
+      "notes": "Synthetic record"
+    },
+    {
+      "tag": "DEMO-MON-001",
+      "lab_id": 1,
+      "category": "Monitor",
+      "name": "Demo Monitor",
+      "specs": "Sample 22-inch monitor",
+      "serial": "DEMO-SERIAL-002",
+      "qty": 10,
+      "status": "Serviceable",
+      "notes": "Synthetic record"
+    },
+    {
+      "tag": "DEMO-PC-002",
+      "lab_id": 2,
+      "category": "Desktop PC",
+      "name": "Demo Desktop PC",
+      "specs": "Sample CPU, RAM and storage",
+      "serial": "DEMO-SERIAL-003",
+      "qty": 8,
+      "status": "For Repair",
+      "notes": "Synthetic record"
+    }
+  ],
+  "maintenance": [
+    {
+      "lab_id": 1,
+      "date": "2026-01-15",
+      "unit": "DEMO-PC-001",
+      "type": "Preventive",
+      "problem": "Routine inspection",
+      "action": "Cleaned and checked sample workstation",
+      "technician": "Demo Technician",
+      "status": "Resolved",
+      "cost": 0
+    }
+  ],
+  "repairs": [
+    {
+      "ticket_no": "DEMO-RR-001",
+      "lab_id": 2,
+      "item": "Demo Desktop PC",
+      "unit": "DEMO-PC-002",
+      "reported_date": "2026-02-01",
+      "issue": "Sample hardware issue",
+      "action": "Assess",
+      "priority": "Low",
+      "status": "Open",
+      "notes": "Synthetic record"
+    }
+  ],
+  "incidents": [
+    {
+      "date": "2026-02-05",
+      "lab_id": 1,
+      "unit": "DEMO-PC-001",
+      "description": "Sample incident record",
+      "cause": "Demo only",
+      "action_taken": "Recorded for demonstration",
+      "reported_by": "Demo User",
+      "status": "Closed"
+    }
+  ],
+  "schedules": [
+    {
+      "lab_id": 1,
+      "task": "Demo preventive maintenance",
+      "frequency": "Quarterly",
+      "last_done": "2026-01-01",
+      "next_due": "2026-04-01",
+      "assigned_to": "Demo Technician",
+      "status": "Scheduled"
+    }
+  ],
+  "parts": [
+    {
+      "name": "Demo RAM module",
+      "category": "Memory",
+      "qty": 5,
+      "min_qty": 2,
+      "location": "Demo storage",
+      "notes": "Synthetic stock record"
+    }
+  ],
+  "accounts": [
+    {
+      "lab_id": 1,
+      "file": "demo-accounts.csv",
+      "count": 10,
+      "pattern": "demo-user-NN@example.invalid",
+      "notes": "Placeholder pattern; not real accounts"
+    }
+  ]
+}
