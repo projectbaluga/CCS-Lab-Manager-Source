@@ -5,7 +5,9 @@ use axum::{extract::{Path, Query, State}, http::{header, HeaderMap, StatusCode},
 use rusqlite::{params_from_iter, types::{Value as SV, ValueRef}, Connection};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex}};
+use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
+use rand::{rngs::OsRng, RngCore};
+use std::{collections::HashMap, time::{Duration, Instant}, sync::{Arc, Mutex}};
 
 struct Col { n: &'static str, t: &'static str, o: &'static str }
 struct Tbl { name: &'static str, title: &'static str, ro: bool, cols: &'static [Col] }
@@ -26,25 +28,32 @@ static TABLES: &[Tbl] = &[
     Tbl { name: "audit", title: "Audit Log", ro: true, cols: &[c!("ts","t",""), c!("who","t",""), c!("action","t",""), c!("tbl","t",""), c!("rec_id","i",""), c!("detail","t","")] },
 ];
 
-struct App { db: Mutex<Connection>, sess: Mutex<HashMap<String, (String, String)>> }
+struct Session { user: String, role: String, expires: Instant }
+struct App { db: Mutex<Connection>, sess: Mutex<HashMap<String, Session>>, login_failures: Mutex<HashMap<String, (u32, Instant)>> }
 type S = Arc<App>;
-static CTR: AtomicU64 = AtomicU64::new(1);
 
 fn tbl(n: &str) -> Option<&'static Tbl> { TABLES.iter().find(|t| t.name == n) }
 fn dbcols(t: &Tbl) -> Vec<&'static Col> { t.cols.iter().filter(|c| c.o != "pw").collect() }
 fn rnd() -> String {
-    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let mut h = Sha256::new();
-    h.update(n.to_le_bytes()); h.update(CTR.fetch_add(1, Ordering::SeqCst).to_le_bytes());
-    h.update(format!("{:p}", &n).as_bytes());
-    format!("{:x}", h.finalize())[..32].to_string()
+ let mut bytes = [0u8; 32]; OsRng.fill_bytes(&mut bytes);
+ bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
-fn hash(p: &str, salt: &str) -> String { let mut h = Sha256::new(); h.update(salt.as_bytes()); h.update(p.as_bytes()); format!("{}${:x}", salt, h.finalize()) }
-fn verify(p: &str, stored: &str) -> bool { stored.split_once('$').map(|(s, _)| hash(p, s) == stored).unwrap_or(false) }
+fn hash(p: &str) -> String {
+ let salt = SaltString::generate(&mut OsRng);
+ Argon2::default().hash_password(p.as_bytes(), &salt).expect("password hashing failed").to_string()
+}
+fn legacy_hash(p: &str, salt: &str) -> String {
+ let mut h = Sha256::new(); h.update(salt.as_bytes()); h.update(p.as_bytes()); format!("{}${:x}", salt, h.finalize())
+}
+fn verify(p: &str, stored: &str) -> bool {
+ if stored.starts_with("$argon2") { return PasswordHash::new(stored).ok().map(|h| Argon2::default().verify_password(p.as_bytes(), &h).is_ok()).unwrap_or(false); }
+ stored.split_once('$').map(|(salt, _)| legacy_hash(p, salt) == stored).unwrap_or(false)
+}
 fn err(c: StatusCode, m: &str) -> Response { (c, Json(json!({ "error": m }))).into_response() }
 fn auth(s: &S, h: &HeaderMap) -> Option<(String, String)> {
-    let t = h.get("x-token")?.to_str().ok()?;
-    s.sess.lock().unwrap().get(t).cloned()
+ let t = h.get("x-token")?.to_str().ok()?; let mut sessions = s.sess.lock().unwrap();
+ let session = sessions.get(t)?; if session.expires <= Instant::now() { sessions.remove(t); return None; }
+ Some((session.user.clone(), session.role.clone()))
 }
 fn can_write(t: &str, role: &str, del: bool) -> bool {
     match role { "admin" => true, "technician" => t != "users" && !(del && t == "labs"), _ => false }
@@ -64,11 +73,12 @@ fn conv(c: &Col, v: &Value) -> SV {
     match c.t { "i" => s.parse::<f64>().map(|x| SV::Integer(x as i64)).unwrap_or(SV::Null), "r" => s.parse::<f64>().map(SV::Real).unwrap_or(SV::Null), _ => SV::Text(s) }
 }
 fn audit(db: &Connection, who: &str, action: &str, t: &str, id: i64, detail: &Value) {
-    let mut d = detail.to_string(); d.truncate(400);
-    let _ = db.execute("INSERT INTO audit(ts,who,action,tbl,rec_id,detail) VALUES(datetime('now','localtime'),?1,?2,?3,?4,?5)", rusqlite::params![who, action, t, id, d]);
+ let mut safe = detail.clone(); if t == "users" { if let Some(fields) = safe.as_object_mut() { fields.remove("password"); fields.remove("pass_hash"); } }
+ let d: String = safe.to_string().chars().take(400).collect();
+ let _ = db.execute("INSERT INTO audit(ts,who,action,tbl,rec_id,detail) VALUES(datetime('now','localtime'),?1,?2,?3,?4,?5)", rusqlite::params![who, action, t, id, d]);
 }
 fn set_pw(db: &Connection, id: i64, b: &Value) -> rusqlite::Result<()> {
-    if let Some(p) = b["password"].as_str() { if !p.is_empty() { db.execute("UPDATE users SET pass_hash=?1 WHERE id=?2", rusqlite::params![hash(p, &rnd()[..12]), id])?; } }
+    if let Some(p) = b["password"].as_str() { if !p.is_empty() { db.execute("UPDATE users SET pass_hash=?1 WHERE id=?2", rusqlite::params![hash(p), id])?; } }
     Ok(())
 }
 fn insert(db: &Connection, t: &Tbl, b: &Value) -> rusqlite::Result<i64> {
@@ -99,17 +109,18 @@ fn fetch(db: &Connection, t: &Tbl, q: Option<&str>) -> Vec<Value> {
 
 async fn index() -> Html<&'static str> { Html(include_str!("../static/index.html")) }
 async fn login(State(s): State<S>, Json(b): Json<Value>) -> Response {
-    let (u, p) = (b["username"].as_str().unwrap_or(""), b["password"].as_str().unwrap_or(""));
-    let row: Option<(String, String, String)> = { let db = s.db.lock().unwrap();
-        db.query_row("SELECT pass_hash,role,COALESCE(full_name,username) FROM users WHERE username=?1", [u], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).ok() };
-    match row {
-        Some((h, role, name)) if verify(p, &h) => {
-            let tok = rnd(); s.sess.lock().unwrap().insert(tok.clone(), (u.to_string(), role.clone()));
-            audit(&s.db.lock().unwrap(), u, "login", "users", 0, &json!({}));
-            Json(json!({ "token": tok, "role": role, "name": name })).into_response()
-        }
-        _ => err(StatusCode::UNAUTHORIZED, "Invalid username or password"),
-    }
+ let (u,p)=(b["username"].as_str().unwrap_or(""),b["password"].as_str().unwrap_or("")); let key=u.to_lowercase();
+ { let mut failures=s.login_failures.lock().unwrap(); if let Some((count,until))=failures.get(&key) { if *count>=5 && Instant::now()<*until { return err(StatusCode::TOO_MANY_REQUESTS,"Too many failed attempts. Try again in one minute."); } } if failures.get(&key).map(|(_,until)|Instant::now()>=*until).unwrap_or(false) { failures.remove(&key); } }
+ let row:Option<(String,String,String)>={ let db=s.db.lock().unwrap(); db.query_row("SELECT pass_hash,role,COALESCE(full_name,username) FROM users WHERE username=?1",[u],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).ok() };
+ match row {
+  Some((stored,role,name)) if verify(p,&stored)=>{
+   s.login_failures.lock().unwrap().remove(&key); let tok=rnd();
+   s.sess.lock().unwrap().insert(tok.clone(),Session{user:u.to_string(),role:role.clone(),expires:Instant::now()+Duration::from_secs(8*60*60)});
+   if !stored.starts_with("$argon2") { let _=s.db.lock().unwrap().execute("UPDATE users SET pass_hash=?1 WHERE username=?2",rusqlite::params![hash(p),u]); }
+   audit(&s.db.lock().unwrap(),u,"login","users",0,&json!({})); Json(json!({"token":tok,"role":role,"name":name})).into_response()
+  }
+  _=>{ let mut failures=s.login_failures.lock().unwrap(); let entry=failures.entry(key).or_insert((0,Instant::now()+Duration::from_secs(60))); entry.0+=1; if entry.0>=5 {entry.1=Instant::now()+Duration::from_secs(60);} err(StatusCode::UNAUTHORIZED,"Invalid username or password") }
+ }
 }
 async fn schema() -> Json<Value> {
     Json(Value::Array(TABLES.iter().map(|t| json!({ "name": t.name, "title": t.title, "ro": t.ro,
@@ -127,7 +138,13 @@ async fn export(State(s): State<S>, h: HeaderMap, Path(t): Path<String>) -> Resp
     if (t == "users" || t == "audit") && role != "admin" { return err(StatusCode::FORBIDDEN, "Admin only"); }
     let rows = fetch(&s.db.lock().unwrap(), tb, None);
     let names: Vec<&str> = std::iter::once("id").chain(dbcols(tb).iter().map(|c| c.n)).collect();
-    let q = |v: &Value| format!("\"{}\"", match v { Value::Null => String::new(), Value::String(x) => x.replace('"', "\"\""), o => o.to_string() });
+    let q = |v: &Value| {
+        let raw = match v { Value::Null => String::new(), Value::String(x) => x.clone(), o => o.to_string() };
+        let first = raw.trim_start().chars().next();
+        let dangerous = matches!(first, Some('=' | '+' | '-' | '@' | '\t' | '\r'));
+        let safe = if matches!(v, Value::String(_)) && dangerous { format!("'{}", raw) } else { raw };
+        format!("\"{}\"", safe.replace('"', "\"\""))
+    };
     let mut out = names.join(",") + "\n";
     for r in rows { out += &names.iter().map(|n| q(&r[*n])).collect::<Vec<_>>().join(","); out.push('\n'); }
     ([(header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()), (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}.csv\"", t))], out).into_response()
@@ -237,6 +254,10 @@ fn init(db: &Connection) {
     audit(db, "system", "seed", "all", 0, &json!({ "note": "Initial data imported from CCS-Files" }));
 }
 
+async fn logout(State(s): State<S>, h: HeaderMap) -> Response {
+ if let Some(t)=h.get("x-token").and_then(|v|v.to_str().ok()) { s.sess.lock().unwrap().remove(t); }
+ Json(json!({"ok":true})).into_response()
+}
 async fn passwd(State(s): State<S>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     let Some((user, _)) = auth(&s, &h) else { return err(StatusCode::UNAUTHORIZED, "Login required") };
     let (old, new) = (b["old"].as_str().unwrap_or(""), b["new"].as_str().unwrap_or(""));
@@ -244,7 +265,7 @@ async fn passwd(State(s): State<S>, h: HeaderMap, Json(b): Json<Value>) -> Respo
     let db = s.db.lock().unwrap();
     let cur: String = db.query_row("SELECT pass_hash FROM users WHERE username=?1", [&user], |r| r.get(0)).unwrap_or_default();
     if !verify(old, &cur) { return err(StatusCode::FORBIDDEN, "Current password is incorrect"); }
-    let _ = db.execute("UPDATE users SET pass_hash=?1 WHERE username=?2", rusqlite::params![hash(new, &rnd()[..12]), user]);
+    let _ = db.execute("UPDATE users SET pass_hash=?1 WHERE username=?2", rusqlite::params![hash(new), user]);
     audit(&db, &user, "password", "users", 0, &json!({}));
     Json(json!({ "ok": true })).into_response()
 }
@@ -289,8 +310,8 @@ fn main() {
     let db = Connection::open(&path).expect("cannot open database");
     init(&db);
     let _ = db.execute("UPDATE assets SET name=trim(CASE WHEN instr(specs,',')>0 THEN substr(specs,1,instr(specs,',')-1) ELSE specs END) WHERE name=category AND specs IS NOT NULL AND specs!='' AND category NOT IN ('Tools','Consumables','Other')", []);
-    let st: S = Arc::new(App { db: Mutex::new(db), sess: Mutex::new(HashMap::new()) });
-    let app = Router::new().route("/", get(index)).route("/api/login", post(login)).route("/api/password", post(passwd)).route("/api/backup", get(backup)).route("/api/pulse", get(pulse)).route("/api/search", get(search)).route("/api/schema", get(schema)).route("/api/dashboard", get(dash))
+    let st: S = Arc::new(App { db: Mutex::new(db), sess: Mutex::new(HashMap::new()), login_failures: Mutex::new(HashMap::new()) });
+    let app = Router::new().route("/", get(index)).route("/api/login", post(login)).route("/api/logout", post(logout)).route("/api/password", post(passwd)).route("/api/backup", get(backup)).route("/api/pulse", get(pulse)).route("/api/search", get(search)).route("/api/schema", get(schema)).route("/api/dashboard", get(dash))
         .route("/api/:t", get(list).post(create)).route("/api/:t/export", get(export)).route("/api/:t/:id", put(update).delete(remove)).with_state(st);
     let listener = if lan { std::net::TcpListener::bind("0.0.0.0:8080").or_else(|_| std::net::TcpListener::bind("127.0.0.1:0")) } else { std::net::TcpListener::bind("127.0.0.1:47831").or_else(|_| std::net::TcpListener::bind("127.0.0.1:0")) }.expect("cannot open a network port");
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(8080);
